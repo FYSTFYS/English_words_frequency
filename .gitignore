@@ -1,0 +1,10 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+
+books/
+txtdir/
+xlsxdir/
+
+.venv/
+venv/
