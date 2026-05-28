@@ -304,37 +304,35 @@ def convert_epub_to_txt(
     end_percent: float = 100,
     workers: int | None = None,
 ) -> int:
-    """Convert a percentage range of an EPUB to tokenized TXT.
+    """Convert a percentage range of an EPUB to plain-text TXT.
 
-    Returns the number of tokens written.
+    Returns the number of characters written.
     """
     epub_path = str(epub_path)
     workers = default_worker_count() if workers is None else max(1, workers)
-    chunks = _epub_range_chunks(epub_path, start_percent, end_percent, workers)
-    token_count = 0
-    line_tokens: list[str] = []
+    char_count = 0
     txt_path = Path(txt_path)
     txt_path.parent.mkdir(parents=True, exist_ok=True)
 
     with txt_path.open("w", encoding="utf-8") as output:
-        token_batches = _map_ordered(
-            _range_chunk_tokens,
-            [(epub_path, chunk) for chunk in chunks],
-            workers,
-        )
-        for tokens in token_batches:
-            for token in tokens:
-                line_tokens.append(token)
-                token_count += 1
-                if len(line_tokens) >= 1000:
-                    output.write(" ".join(line_tokens))
-                    output.write("\n")
-                    line_tokens.clear()
-        if line_tokens:
-            output.write(" ".join(line_tokens))
+        for text in iter_epub_range_text(epub_path, start_percent, end_percent, workers):
+            if not text:
+                continue
+            output.write(text)
             output.write("\n")
+            char_count += len(text)
 
-    return token_count
+    return char_count
+
+
+def convert_epub_to_text(
+    epub_path: str | Path,
+    txt_path: str | Path,
+    start_percent: float = 0,
+    end_percent: float = 100,
+    workers: int | None = None,
+) -> int:
+    return convert_epub_to_txt(epub_path, txt_path, start_percent, end_percent, workers)
 
 
 def _parse_percent(value: str, default: float) -> float:
@@ -350,7 +348,7 @@ def prompt_percent_range() -> tuple[float, float]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Extract EPUB words into a TXT file.")
+    parser = argparse.ArgumentParser(description="Extract EPUB text into a TXT file.")
     parser.add_argument("epub", help="EPUB path, or filename/stem inside books/.")
     parser.add_argument("txt", nargs="?", help="Output TXT path. Defaults to txtdir/<book>.txt.")
     parser.add_argument("--start", type=float, default=None, help="Start percent. Defaults to prompt.")
@@ -368,7 +366,7 @@ def main(argv: list[str] | None = None) -> int:
     txt_path = Path(args.txt).expanduser() if args.txt else default_txt_path(epub_path)
 
     count = convert_epub_to_txt(epub_path, txt_path, start, end, args.workers)
-    print(f"Wrote {count} tokens to {txt_path}")
+    print(f"Wrote {count} characters to {txt_path}")
     return 0
 
 

@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from epub_to_txt import convert_epub_to_txt
+from epub_to_txt import convert_epub_to_text
 from txt_to_excel import convert_txt_to_excel
 
 
@@ -62,9 +62,9 @@ def run_workflow(
     _validate_percent_range(start_percent, end_percent)
     TXT_DIR.mkdir(parents=True, exist_ok=True)
     XLSX_DIR.mkdir(parents=True, exist_ok=True)
-    token_count = convert_epub_to_txt(epub_path, txt_path, start_percent, end_percent, workers)
+    char_count = convert_epub_to_text(epub_path, txt_path, start_percent, end_percent, workers)
     unique_count = convert_txt_to_excel(txt_path, xlsx_path, workers)
-    return token_count, unique_count
+    return char_count, unique_count
 
 
 def interactive_main() -> int:
@@ -83,11 +83,11 @@ def interactive_main() -> int:
     workers_input = input("Workers [default CPU-based]: ").strip()
     workers = int(workers_input) if workers_input else None
 
-    token_count, unique_count = run_workflow(epub_path, txt_path, xlsx_path, start, end, workers)
+    char_count, unique_count = run_workflow(epub_path, txt_path, xlsx_path, start, end, workers)
     print(f"TXT: {txt_path}")
     print(f"Excel: {xlsx_path}")
-    print(f"Tokens: {token_count}")
-    print(f"Unique words: {unique_count}")
+    print(f"Characters: {char_count}")
+    print(f"Unique lemmas: {unique_count}")
     return 0
 
 
@@ -108,11 +108,11 @@ def main(argv: list[str] | None = None) -> int:
     txt_path = Path(args.txt).expanduser() if args.txt else _default_txt_path(epub_path)
     xlsx_path = Path(args.xlsx).expanduser() if args.xlsx else _default_xlsx_path(epub_path)
 
-    token_count, unique_count = run_workflow(epub_path, txt_path, xlsx_path, args.start, args.end, args.workers)
+    char_count, unique_count = run_workflow(epub_path, txt_path, xlsx_path, args.start, args.end, args.workers)
     print(f"TXT: {txt_path}")
     print(f"Excel: {xlsx_path}")
-    print(f"Tokens: {token_count}")
-    print(f"Unique words: {unique_count}")
+    print(f"Characters: {char_count}")
+    print(f"Unique lemmas: {unique_count}")
     return 0
 
 
