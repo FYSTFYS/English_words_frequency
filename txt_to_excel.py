@@ -7,6 +7,7 @@ import argparse
 import html
 import os
 import re
+import sys
 import warnings
 import zipfile
 from collections import Counter, defaultdict
@@ -147,16 +148,22 @@ def _load_spacy_model(model_name: str):
         import spacy
     except ImportError as exc:
         raise RuntimeError(
-            "spaCy is required. Install it with: pyenvdir; python -m pip install spacy"
+            f"spaCy is required. Install it with:\n  {sys.executable} -m pip install spacy"
         ) from exc
 
     try:
         return spacy.load(model_name, disable=["ner"])
     except OSError as exc:
-        raise RuntimeError(
-            f"spaCy model '{model_name}' is required. Install it with: "
-            f"pyenvdir; python -m spacy download {model_name}"
-        ) from exc
+        try:
+            from spacy.cli import download
+
+            download(model_name)
+            return spacy.load(model_name, disable=["ner"])
+        except Exception as download_exc:
+            raise RuntimeError(
+                f"spaCy model '{model_name}' is required. Install it with:\n"
+                f"  {sys.executable} -m spacy download {model_name}"
+            ) from download_exc
 
 
 @lru_cache(maxsize=50_000)
