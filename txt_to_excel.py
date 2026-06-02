@@ -14,10 +14,14 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
+from ankicheck import DEFAULT_ANKI_CONNECT_URL, check_lemmas
+
 
 DEFAULT_CHUNK_SIZE = 120_000
 TOKEN_RE = re.compile(r"[A-Za-z]+(?:-[A-Za-z]+)*")
 SIMPLE_WORD_RE = re.compile(r"^[a-z]+$")
+SPLIT_INITIAL_RE = re.compile(r"\b([A-Za-z])\s+([A-Za-z]{2,})\b")
+ROMAN_NUMERAL_RE = re.compile(r"^(?=[ivxlcdm]+$)[ivxlcdm]+$")
 BASE_DIR = Path(__file__).resolve().parent
 TXT_DIR = BASE_DIR / "txtdir"
 XLSX_DIR = BASE_DIR / "xlsxdir"
@@ -48,6 +52,12 @@ def resolve_txt_path(txt_input: str | Path) -> Path:
 
 def default_xlsx_path(txt_path: str | Path) -> Path:
     return XLSX_DIR / f"{Path(txt_path).stem}.xlsx"
+
+
+def combined_xlsx_path(txt_paths: list[str | Path]) -> Path:
+    if not txt_paths:
+        raise ValueError("At least one TXT is required")
+    return XLSX_DIR / f"{Path(txt_paths[0]).stem}_combined.xlsx"
 
 
 def load_excluded_words(vocabulary_dir: str | Path = VOCABULARY_EXCLUDE_DIR) -> set[str]:
@@ -104,7 +114,33 @@ def _iter_text_chunks(txt_path: str | Path, chunk_size: int = DEFAULT_CHUNK_SIZE
         yield "".join(buffer)
 
 
+@lru_cache(maxsize=100_000)
+def _looks_like_real_word(word: str) -> bool:
+    try:
+        from wordfreq import zipf_frequency
+    except ImportError:
+        return True
+    return zipf_frequency(word, "en") >= 1.5
+
+
+def _repair_split_initial_words(text: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        if not match.group(2).isupper():
+            return match.group(0)
+        combined = f"{match.group(1)}{match.group(2)}"
+        return combined if _looks_like_real_word(combined.lower()) else match.group(0)
+
+    return SPLIT_INITIAL_RE.sub(replace, text)
+
+
 def _load_spacy_model(model_name: str):
+    warning_rule = "ignore:urllib3 v2 only supports OpenSSL"
+    current_pythonwarnings = os.environ.get("PYTHONWARNINGS")
+    if current_pythonwarnings:
+        if warning_rule not in current_pythonwarnings:
+            os.environ["PYTHONWARNINGS"] = f"{current_pythonwarnings},{warning_rule}"
+    else:
+        os.environ["PYTHONWARNINGS"] = warning_rule
     warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL.*")
 
     try:
@@ -155,6 +191,8 @@ def _valid_lemma_token(token) -> tuple[str, str] | None:
     form = token.text.lower()
     if len(form) <= 1:
         return None
+    if ROMAN_NUMERAL_RE.fullmatch(form):
+        return None
 
     lemma = token.lemma_.lower().strip()
     if lemma == form:
@@ -165,11 +203,13 @@ def _valid_lemma_token(token) -> tuple[str, str] | None:
         return None
     if not SIMPLE_WORD_RE.fullmatch(lemma):
         return None
+    if ROMAN_NUMERAL_RE.fullmatch(lemma):
+        return None
     return lemma, form
 
 
 def collect_lemma_frequencies(
-    txt_path: str | Path,
+    txt_paths: str | Path | list[str | Path],
     workers: int | None = None,
     model_name: str = "en_core_web_sm",
     chunk_size: int = DEFAULT_CHUNK_SIZE,
@@ -179,7 +219,17 @@ def collect_lemma_frequencies(
     n_process = workers if workers > 1 else 1
     lemma_forms: dict[str, Counter[str]] = defaultdict(Counter)
 
-    for doc in nlp.pipe(_iter_text_chunks(txt_path, chunk_size), batch_size=8, n_process=n_process):
+    if isinstance(txt_paths, (str, Path)):
+        resolved_txt_paths = [txt_paths]
+    else:
+        resolved_txt_paths = txt_paths
+
+    text_chunks = (
+        _repair_split_initial_words(chunk)
+        for txt_path in resolved_txt_paths
+        for chunk in _iter_text_chunks(txt_path, chunk_size)
+    )
+    for doc in nlp.pipe(text_chunks, batch_size=8, n_process=n_process):
         for token in doc:
             parsed = _valid_lemma_token(token)
             if parsed is None:
@@ -200,8 +250,9 @@ def _filtered_rows(
     lemma_forms: dict[str, Counter[str]],
     excluded_words: set[str],
     wordlist_tags: dict[str, str],
+    anki_added: dict[str, bool] | None = None,
 ) -> list[list[str | int]]:
-    rows: list[list[str | int]] = [["lemma", "count", "forms", "wordlist_tag"]]
+    rows: list[list[str | int]] = [["lemma", "count", "forms", "wordlist_tag", "anki_added"]]
     sortable = []
     for lemma, forms in lemma_forms.items():
         if lemma in excluded_words:
@@ -209,9 +260,25 @@ def _filtered_rows(
         count = sum(forms.values())
         sortable.append((lemma, count, forms))
 
+    anki_added = anki_added or {}
     for lemma, count, forms in sorted(sortable, key=lambda item: (-item[1], item[0])):
-        rows.append([lemma, count, _forms_text(forms), wordlist_tags.get(lemma, "")])
+        rows.append([
+            lemma,
+            count,
+            _forms_text(forms),
+            wordlist_tags.get(lemma, ""),
+            "yes" if anki_added.get(lemma, False) else "",
+        ])
     return rows
+
+
+def _anki_candidates(lemma_forms: dict[str, Counter[str]], excluded_words: set[str]) -> dict[str, set[str]]:
+    candidates: dict[str, set[str]] = {}
+    for lemma, forms in lemma_forms.items():
+        if lemma in excluded_words:
+            continue
+        candidates[lemma] = {lemma, *forms.keys()}
+    return candidates
 
 
 def _excel_col_name(index: int) -> str:
@@ -243,9 +310,10 @@ def _sheet_xml(rows: list[list[str | int]]) -> str:
         '<cols><col min="1" max="1" width="28" customWidth="1"/>'
         '<col min="2" max="2" width="12" customWidth="1"/>'
         '<col min="3" max="3" width="64" customWidth="1"/>'
-        '<col min="4" max="4" width="20" customWidth="1"/></cols>'
+        '<col min="4" max="4" width="20" customWidth="1"/>'
+        '<col min="5" max="5" width="14" customWidth="1"/></cols>'
         f'<sheetData>{"".join(xml_rows)}</sheetData>'
-        '<autoFilter ref="A1:D1"/>'
+        '<autoFilter ref="A1:E1"/>'
         '</worksheet>'
     )
 
@@ -322,18 +390,27 @@ def _write_xlsx(rows: list[list[str | int]], xlsx_path: str | Path) -> None:
 
 
 def convert_txt_to_excel(
-    txt_path: str | Path,
+    txt_path: str | Path | list[str | Path],
     xlsx_path: str | Path,
     workers: int | None = None,
     vocabulary_dir: str | Path = VOCABULARY_EXCLUDE_DIR,
     wordlist_dir: str | Path = WORDLIST_DIR,
     model_name: str = "en_core_web_sm",
+    anki_check: bool = True,
+    anki_url: str = DEFAULT_ANKI_CONNECT_URL,
 ) -> int:
     lemma_forms = collect_lemma_frequencies(txt_path, workers, model_name)
+    excluded_words = load_excluded_words(vocabulary_dir)
+    anki_added = (
+        check_lemmas(_anki_candidates(lemma_forms, excluded_words), url=anki_url)
+        if anki_check
+        else {}
+    )
     rows = _filtered_rows(
         lemma_forms,
-        load_excluded_words(vocabulary_dir),
+        excluded_words,
         load_wordlist_tags(wordlist_dir),
+        anki_added,
     )
     _write_xlsx(rows, xlsx_path)
     return len(rows) - 1
@@ -341,8 +418,11 @@ def convert_txt_to_excel(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Count TXT lemma frequencies and write an XLSX file.")
-    parser.add_argument("txt", help="TXT path, or filename/stem inside txtdir/.")
-    parser.add_argument("xlsx", nargs="?", help="Output XLSX path. Defaults to xlsxdir/<txt>.xlsx.")
+    parser.add_argument(
+        "paths",
+        nargs="+",
+        help="One or more TXT inputs, optionally followed by an .xlsx output path.",
+    )
     parser.add_argument("--workers", type=int, default=None, help="spaCy n_process worker count. Defaults to CPU count.")
     parser.add_argument(
         "--vocabulary-dir",
@@ -355,18 +435,31 @@ def main(argv: list[str] | None = None) -> int:
         help="Directory containing readme.txt and prioritized wordlist files. Defaults to ./wordlist.",
     )
     parser.add_argument("--model", default="en_core_web_sm", help="spaCy model name. Defaults to en_core_web_sm.")
+    parser.add_argument("--anki-check", dest="anki_check", action="store_true", default=True, help="Check local Anki through AnkiConnect. Enabled by default.")
+    parser.add_argument("--no-anki-check", dest="anki_check", action="store_false", help="Disable local Anki check.")
+    parser.add_argument("--anki-url", default=DEFAULT_ANKI_CONNECT_URL, help="AnkiConnect URL. Defaults to http://127.0.0.1:8765.")
     args = parser.parse_args(argv)
 
-    txt_path = resolve_txt_path(args.txt)
-    xlsx_path = Path(args.xlsx).expanduser() if args.xlsx else default_xlsx_path(txt_path)
+    raw_paths = list(args.paths)
+    if len(raw_paths) > 1 and Path(raw_paths[-1]).suffix.lower() == ".xlsx":
+        xlsx_path = Path(raw_paths.pop()).expanduser()
+    else:
+        xlsx_path = None
+
+    txt_paths = [resolve_txt_path(txt_input) for txt_input in raw_paths]
+    xlsx_path = xlsx_path if xlsx_path is not None else (
+        default_xlsx_path(txt_paths[0]) if len(txt_paths) == 1 else combined_xlsx_path(txt_paths)
+    )
 
     unique_count = convert_txt_to_excel(
-        txt_path,
+        txt_paths,
         xlsx_path,
         args.workers,
         args.vocabulary_dir,
         args.wordlist_dir,
         args.model,
+        args.anki_check,
+        args.anki_url,
     )
     print(f"Wrote {unique_count} lemmas to {xlsx_path}")
     return 0
