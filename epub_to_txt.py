@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import unquote, urldefrag
 
 
 WORD_RE = re.compile(r"[A-Za-z]+(?:-[A-Za-z]+)*")
@@ -139,6 +140,13 @@ def _container_opf_path(epub: zipfile.ZipFile) -> str:
     raise ValueError("EPUB container.xml does not contain a rootfile entry")
 
 
+def _normalize_href_to_zip_path(opf_dir: str, href: str) -> str:
+    href, _fragment = urldefrag(href)
+    href = href.split("?", 1)[0]
+    href = unquote(href)
+    return posixpath.normpath(posixpath.join(opf_dir, href))
+
+
 def _spine_items(epub: zipfile.ZipFile) -> list[SpineItem]:
     opf_path = _container_opf_path(epub)
     opf_text = _read_xml_text(epub, opf_path)
@@ -162,7 +170,7 @@ def _spine_items(epub: zipfile.ZipFile) -> list[SpineItem]:
         href = id_to_href.get(idref or "")
         if not href:
             continue
-        zip_path = posixpath.normpath(posixpath.join(opf_dir, href))
+        zip_path = _normalize_href_to_zip_path(opf_dir, href)
         items.append(SpineItem(href=href, zip_path=zip_path))
 
     if not items:
